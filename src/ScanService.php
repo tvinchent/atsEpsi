@@ -33,17 +33,36 @@ class ScanService
                 continue;
             }
 
-            $cvFile = $this->findCvFile($fullPath);
-            if (!$cvFile) {
-                $results[$personDir] = 'Aucun CV trouvé';
-                continue;
-            }
+            $cvFiles = $this->findCvFiles($fullPath);
+if (empty($cvFiles)) {
+    $results[$personDir] = 'Aucun CV trouvé';
+    continue;
+}
 
-            $texte = $this->extractText($cvFile);
-            if ($texte === null || $texte === '') {
-                $results[$personDir] = 'Erreur extraction';
-                continue;
-            }
+$combinedText = '';
+
+foreach ($cvFiles as $cvFile) {
+    $texte = $this->extractText($cvFile);
+    if ($texte !== null && $texte !== '') {
+        $combinedText .= $texte . "\n\n";
+    }
+}
+
+$combinedText = trim($combinedText);
+
+if ($combinedText === '') {
+    $results[$personDir] = 'Erreur extraction';
+    continue;
+}
+
+// upsert intervenant + compétences avec le texte concaténé
+$intervenantId = $this->upsertIntervenant($personDir, $combinedText);
+
+$competenceService = new CompetenceService();
+$competenceService->analyzeAndSave($intervenantId, $combinedText);
+
+$results[$personDir] = 'OK (' . count($cvFiles) . ' fichier(s) CV)';
+
 
             // upsert intervenant
             $intervenantId = $this->upsertIntervenant($personDir, $texte);
@@ -58,18 +77,54 @@ class ScanService
         return $results;
     }
 
-    private function findCvFile(string $dir): ?string
-    {
-        $allowed = ['pdf', 'doc', 'docx'];
-        foreach (scandir($dir) as $file) {
-            if ($file === '.' || $file === '..') continue;
-            $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
-            if (in_array($ext, $allowed, true)) {
-                return $dir . '/' . $file;
-            }
-        }
-        return null;
+    private function findCvFiles(string $personDir): array
+{
+    $allowedExt = ['pdf', 'doc', 'docx'];
+    $files = [];
+
+    if (!is_dir($personDir)) {
+        return [];
     }
+
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator(
+            $personDir,
+            FilesystemIterator::SKIP_DOTS
+        )
+    );
+
+    foreach ($iterator as $fileInfo) {
+        /** @var SplFileInfo $fileInfo */
+        if (!$fileInfo->isFile()) {
+            continue;
+        }
+
+        $path = $fileInfo->getPathname();
+        $filename = $fileInfo->getFilename();
+        $ext = strtolower($fileInfo->getExtension());
+
+        // extension ok ?
+        if (!in_array($ext, $allowedExt, true)) {
+            continue;
+        }
+
+        // nom de fichier doit contenir "cv" (insensible à la casse)
+        if (stripos($filename, 'cv') === false) {
+            continue;
+        }
+
+        // chemin doit contenir 20.CONTRACTUEL et DOC RH
+        if (stripos($path, '20. CONTRACTUEL') === false || stripos($path, 'DOC RH') === false) {
+            continue;
+        }
+
+        $files[] = $path;
+    }
+
+    return $files;
+}
+
+
 
     private function extractText(string $filePath): ?string
     {
@@ -114,42 +169,58 @@ class ScanService
 
 
     private function upsertIntervenant(string $slug, string $texte): int
-    {
-        $pdo = Database::getConnection();
+{
+    $pdo = Database::getConnection();
 
-        // découper prenom-nom depuis le slug
-        $prenom = null;
-        $nom    = null;
-        if (strpos($slug, '-') !== false) {
-            [$p, $n] = explode('-', $slug, 2);
-            $prenom = ucfirst(str_replace('_', ' ', $p));
-            $nom    = ucfirst(str_replace('_', ' ', $n));
+    // slug = "NOM-prenom avec éventuellement des espaces"
+    $nom = null;
+    $prenom = null;
+
+    if (strpos($slug, '-') !== false) {
+        // on coupe en 2 : tout avant le premier "-", tout le reste après
+        [$partNom, $partPrenom] = explode('-', $slug, 2);
+
+        $nom = trim(str_replace('_', ' ', $partNom));
+        $prenom = trim(str_replace('_', ' ', $partPrenom));
+
+        // capitalisation simple
+        if ($nom !== '') {
+            $nom = mb_convert_case($nom, MB_CASE_TITLE, 'UTF-8');
         }
-
-        // existe déjà ?
-        $stmt = $pdo->prepare('SELECT id FROM intervenants WHERE slug = ? LIMIT 1');
-        $stmt->execute([$slug]);
-        $row = $stmt->fetch();
-
-        if ($row) {
-            $id = (int)$row['id'];
-            $stmt = $pdo->prepare('
-                UPDATE intervenants
-                SET prenom = COALESCE(?, prenom),
-                    nom    = COALESCE(?, nom),
-                    texte_cv = ?,
-                    updated_at = NOW()
-                WHERE id = ?
-            ');
-            $stmt->execute([$prenom, $nom, $texte, $id]);
-            return $id;
+        if ($prenom !== '') {
+            $prenom = mb_convert_case($prenom, MB_CASE_TITLE, 'UTF-8');
         }
+    }
+
+    // chercher si l'intervenant existe déjà via le slug
+    $stmt = $pdo->prepare('SELECT id FROM intervenants WHERE slug = ? LIMIT 1');
+    $stmt->execute([$slug]);
+    $row = $stmt->fetch();
+
+    if ($row) {
+        $id = (int)$row['id'];
 
         $stmt = $pdo->prepare('
-            INSERT INTO intervenants (slug, prenom, nom, texte_cv, updated_at)
-            VALUES (?, ?, ?, ?, NOW())
+            UPDATE intervenants
+            SET prenom    = COALESCE(?, prenom),
+                nom       = COALESCE(?, nom),
+                texte_cv  = ?,
+                updated_at = NOW()
+            WHERE id = ?
         ');
-        $stmt->execute([$slug, $prenom, $nom, $texte]);
-        return (int)$pdo->lastInsertId();
+        $stmt->execute([$prenom, $nom, $texte, $id]);
+
+        return $id;
     }
+
+    // création
+    $stmt = $pdo->prepare('
+        INSERT INTO intervenants (slug, prenom, nom, texte_cv, updated_at)
+        VALUES (?, ?, ?, ?, NOW())
+    ');
+    $stmt->execute([$slug, $prenom, $nom, $texte]);
+
+    return (int)$pdo->lastInsertId();
+}
+
 }
