@@ -10,7 +10,16 @@ class ScanService
     public function __construct()
     {
         $config = require __DIR__ . '/../config.php';
-        $this->rawDir   = $config['cv_raw_dir'];
+        foreach ($config['cv_paths'] as $p) {
+        if (is_dir($p)) {
+            $this->rawDir = rtrim($p, '/');
+            break;
+        }
+    }
+
+    if (empty($this->rawDir)) {
+        throw new RuntimeException('Aucun dossier CV trouvé');
+    }
         $this->tikaPath = $config['tika_path'];
 
         if (!file_exists($this->tikaPath)) {
