@@ -1,0 +1,5 @@
+version: "3.9"
+services:
+  app:
+    volumes:
+      - "C:/Users/thibault.vinchent/COMDEV/EPSI - Lille/140.Service Pédagogique/30.CVTHEQUE/25 26:/cv1"

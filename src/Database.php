@@ -7,7 +7,7 @@ class Database
     public static function getConnection(): PDO
     {
         if (self::$pdo === null) {
-            $config = require __DIR__ . '/../config.php';
+            $config = require __DIR__ . '/config.php';
 
             $host = $config['db_host'];
             $db   = $config['db_name'];
