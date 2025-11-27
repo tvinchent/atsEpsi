@@ -10,7 +10,9 @@ services:
     env_file: [".env"]
     volumes:
       - ./src:/var/www/html   # pratique en dev
-    depends_on: [db]
+    depends_on:
+      db:
+        condition: service_healthy
 
   db:
     image: mysql:8
@@ -21,6 +23,11 @@ services:
       MYSQL_PASSWORD: cvpass
     volumes:
       - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ucvuser", "-pcvpass"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
 volumes:
   db_data:
